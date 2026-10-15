@@ -136,7 +136,7 @@ VIDEO_SOURCE_GROUPS = {
         "muapi",
     ),
     "ai_image": ("openai_image",),
-    "local": ("local",),
+    "local": ("local", "tarot"),
 }
 # Upload-Post 的 API Key 与发布用户分别在两个页面管理，并且发布用户名称
 # 不等于登录邮箱。集中维护入口可以避免多语言文案各自硬编码 URL 后发生偏差，
@@ -1541,6 +1541,9 @@ def _apply_restored_params(params):
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
     video_source = params.get("video_source") or "pexels"
+    for field in ("tarot_card_ids", "tarot_effect_ids", "tarot_cta_url", "tarot_cta_duration", "tarot_voice"):
+        if field in params:
+            st.session_state[field] = params[field]
     _set_stable_widget_value("video_source_select", video_source)
     _set_stable_widget_value(
         "video_concat_mode_select", params.get("video_concat_mode") or "random"
@@ -5183,6 +5186,7 @@ def _render_video_settings(panel, params):
                 (tr("Random"), "random"),
             ]
             video_source_labels = {
+                "tarot": "Tarot · thư viện cục bộ",
                 "pexels": tr("Pexels"),
                 "pixabay": tr("Pixabay"),
                 "coverr": tr("Coverr"),
@@ -8370,9 +8374,14 @@ def _render_generation_controls(
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
-
+    workspace_mode = st.radio("Không gian làm việc", ["MoneyPrinterTurbo", "Tarot Reels Studio"], horizontal=True, key="workspace_mode")
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
+    if workspace_mode == "Tarot Reels Studio":
+        from webui.tarot_studio import render_studio
+        render_studio()
+        _save_runtime_config()
+        return
 
     if _apply_pending_settings_preset():
         st.success(tr("Settings Preset Imported"))
@@ -8399,11 +8408,22 @@ def _render_application():
     _render_script_settings(left_panel, params)
 
     uploaded_files = _render_video_settings(middle_panel, params)
-    uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
-        audio_panel, params
-    )
+    if params.video_source == "tarot":
+        with audio_panel:
+            st.write("Âm thanh Tarot")
+            st.caption("Chọn giọng tiếng Việt trong phần Video Tarot bên dưới.")
+            params.bgm_type = st.selectbox("Nhạc nền Tarot", ["", "random"], format_func=lambda v: "Không nhạc nền" if not v else "Nhạc cục bộ ngẫu nhiên", key="tarot_bgm")
+        uploaded_audio_file, uploaded_bgm_file, voice_mode = None, None, VOICE_MODE_TTS
+    else:
+        uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
+            audio_panel, params
+        )
 
     _render_subtitle_settings(right_panel, params)
+
+    from webui.tarot_library import render_asset_manager, render_template
+    render_asset_manager()
+    render_template(params)
 
     generation_submitted = _render_generation_controls(
         params,

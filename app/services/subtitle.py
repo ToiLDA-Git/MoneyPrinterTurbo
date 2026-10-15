@@ -2,6 +2,7 @@ import json
 import os.path
 import tempfile
 import threading
+import ssl
 from timeit import default_timer as timer
 
 try:
@@ -24,6 +25,17 @@ model = None
 _model_init_lock = threading.Lock()
 
 
+def _configure_model_transport():
+    """Use the OS CA store for Hub downloads, including corporate Windows CAs."""
+    import httpx
+    from huggingface_hub import set_client_factory
+
+    set_client_factory(lambda: httpx.Client(
+        verify=ssl.create_default_context(), follow_redirects=True,
+        timeout=httpx.Timeout(60.0, connect=15.0),
+    ))
+
+
 def _ensure_model_loaded() -> bool:
     """Load the large Whisper model once, even when jobs start concurrently."""
     global model
@@ -42,6 +54,8 @@ def _ensure_model_loaded() -> bool:
             f"loading model: {model_path}, device: {device}, compute_type: {compute_type}"
         )
         try:
+            if model_path == model_size:
+                _configure_model_transport()
             model = WhisperModel(
                 model_size_or_path=model_path, device=device, compute_type=compute_type
             )
@@ -63,6 +77,7 @@ def create(
     subtitle_file: str = "",
     word_level: bool = False,
     log_details: bool = True,
+    language: str | None = None,
 ):
     if WhisperModel is None:
         logger.warning("faster_whisper not available, skipping whisper subtitle generation")
@@ -82,6 +97,7 @@ def create(
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=500),
         **({"initial_prompt": initial_prompt} if initial_prompt else {}),
+        **({'language': language} if language else {}),
     )
 
     logger.info(

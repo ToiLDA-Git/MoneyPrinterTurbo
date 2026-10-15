@@ -270,6 +270,13 @@ All examples below were generated with MoneyPrinterTurbo.
 
 ## Quick Start 🚀
 
+### Local Tarot video library
+
+Use **Tarot · thư viện cục bộ** as the video source for original Rider–Waite–Smith
+card animations, Vietnamese narration and subtitles, local MP4 effects, and a
+configurable website end screen. See the [Tarot library guide](docs/tarot-library.md)
+for importing all 78 public-domain cards, asset management, API and CLI usage.
+
 ### Recommended Paths
 
 - If you do not want to install or configure the project manually: generate videos with an AI Agent
