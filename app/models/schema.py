@@ -116,6 +116,11 @@ class VideoParams(BaseModel):
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"
+    tarot_card_ids: List[str] = Field(default_factory=list, max_length=78)
+    tarot_effect_ids: List[str] = Field(default_factory=list, max_length=12)
+    tarot_cta_url: str = Field(default="https://trai-bai-tarot.vercel.app", max_length=250)
+    tarot_cta_duration: float = Field(default=3.0, ge=1, le=10, allow_inf_nan=False)
+    tarot_voice: Literal["vi-VN-HoaiMyNeural-Female", "vi-VN-NamMinhNeural-Male"] = "vi-VN-HoaiMyNeural-Female"
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )

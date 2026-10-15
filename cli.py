@@ -48,6 +48,7 @@ _CLI_VIDEO_SOURCES = (
     "muapi",
     "openai_image",
     "local",
+    "tarot",
 )
 
 
@@ -340,6 +341,9 @@ Batch manifests:
     )
 
     material_group = parser.add_argument_group("materials and pipeline")
+    material_group.add_argument("--tarot-card-ids", default="", help="comma-separated Tarot IDs for scripts without card names")
+    material_group.add_argument("--tarot-effect-ids", default="", help="comma-separated IDs from the local Tarot effects library")
+    material_group.add_argument("--tarot-cta-url", default="https://trai-bai-tarot.vercel.app", help="Tarot end-screen website; empty disables CTA")
     material_group.add_argument(
         "--video-source",
         default="pexels",
@@ -926,6 +930,9 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_script": args.video_script,
         "video_terms": video_terms,
         "video_source": args.video_source,
+        "tarot_card_ids": [value.strip() for value in args.tarot_card_ids.split(",") if value.strip()],
+        "tarot_effect_ids": [value.strip() for value in args.tarot_effect_ids.split(",") if value.strip()],
+        "tarot_cta_url": args.tarot_cta_url,
         "video_materials": video_materials,
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,

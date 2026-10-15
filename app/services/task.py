@@ -28,6 +28,8 @@ from app.services import (
     sonilo,
     subtitle,
     task_artifacts,
+    tarot_assets,
+    tarot_video,
     twelvelabs,
     video,
     volcengine_seedance,
@@ -97,7 +99,7 @@ _VIDEO_MUSIC_PROVIDERS = {
 _SUPPORTED_VIDEO_SOURCES = frozenset({
     "pexels", "pixabay", "coverr", "local", "wavespeed",
     "volcengine_seedance", "ofox", "metaso_minimax", "muapi",
-    "loomloom", "openai_image",
+    "loomloom", "openai_image", "tarot",
 })
 
 
@@ -371,6 +373,8 @@ def generate_script(task_id, params):
 
 
 def generate_terms(task_id, params, video_script):
+    if params.video_source == "tarot":
+        return [card["id"] for card in tarot_assets.select_cards(video_script, params.tarot_card_ids)]
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
     if not video_terms:
@@ -653,7 +657,10 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         return ""
 
     final_subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
-    subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
+    subtitle_provider = (
+        "edge" if getattr(params, "video_source", None) == "tarot"
+        else config.app.get("subtitle_provider", "edge").strip().lower()
+    )
     logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
 
     if not subtitle_provider:
@@ -721,6 +728,9 @@ def get_video_materials(
     audio_duration,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
+    if params.video_source == "tarot":
+        selected = tarot_assets.select_cards(params.video_script, params.tarot_card_ids)
+        return [str(tarot_assets.asset_path(card["image_path"])) for card in selected]
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -1029,22 +1039,29 @@ def generate_final_videos(
         # 每条视频占 50% 进度中的一份，合成与最终编码各占一半。片段处理是
         # 合成里最耗时的部分，逐段推进这一半的进度。
         combine_share = 50 / params.video_count / 2
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_fit_mode=params.video_fit_mode,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            clip_speed=params.video_clip_speed,
-            progress_callback=_stage_progress_reporter(
-                task_id, _progress, _progress + combine_share
-            ),
-            **batch_options,
-        )
+        if params.video_source == "tarot":
+            selected = tarot_assets.select_cards(params.video_script, params.tarot_card_ids)
+            tarot_video.render(
+                combined_video_path, selected, params.video_script,
+                audio_duration, params, subtitle_path,
+            )
+        else:
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_fit_mode=params.video_fit_mode,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+                clip_speed=params.video_clip_speed,
+                progress_callback=_stage_progress_reporter(
+                    task_id, _progress, _progress + combine_share
+                ),
+                **batch_options,
+            )
         if allocate_batch_materials:
             selected_sources = list(dict.fromkeys(used_video_paths))
             reused_sources = [file for file in selected_sources if source_usage.get(file, 0)]
@@ -1519,6 +1536,10 @@ def _run_pipeline(
     voxcpm_prompt_text: str = "",
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    try:
+        tarot_video.apply_template(params)
+    except ValueError as exc:
+        return _mark_task_failed(task_id, "preflight", str(exc))
     sm.state.update_task(
         task_id, state=const.TASK_STATE_PROCESSING, progress=5,
         failed_stage=None, error=None,
@@ -1664,6 +1685,14 @@ def _run_pipeline(
         )
         return _mark_task_failed(task_id, "script", error)
 
+    if params.video_source == "tarot":
+        params.video_script = video_script
+        if stop_at != "script":
+            try:
+                selected = tarot_assets.select_cards(video_script, params.tarot_card_ids)
+                params.tarot_card_ids = [card["id"] for card in selected]
+            except ValueError as exc:
+                return _mark_task_failed(task_id, "materials", str(exc))
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
 
     if stop_at == "script":
@@ -1751,6 +1780,8 @@ def _run_pipeline(
     subtitle_path = generate_subtitle(
         task_id, params, video_script, sub_maker, audio_file
     )
+    if params.video_source == "tarot" and not subtitle_path:
+        return _mark_task_failed(task_id, "subtitle", "Tarot requires synchronized subtitles; verify Edge TTS connectivity")
 
     if stop_at == "subtitle":
         if not subtitle_path:

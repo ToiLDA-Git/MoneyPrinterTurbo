@@ -1848,7 +1848,10 @@ def generate_video(
                 bgm_effects.append(afx.AudioFadeOut(3))
                 bgm_source_clip = clip_stack.enter_context(AudioFileClip(bgm_file))
                 bgm_clip = bgm_source_clip.with_effects(bgm_effects)
-                audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
+                # CompositeAudioClip inherits its longest child's duration.
+                # A local/provider music bed must never extend the MP4 past
+                # its picture timeline (e.g. 65s music on a 30s Tarot video).
+                audio_clip = CompositeAudioClip([audio_clip, bgm_clip]).with_duration(video_clip.duration)
             except Exception:
                 bgm_mix_succeeded = False
                 # 记录完整堆栈和稳定上下文，便于区分文件解码、MoviePy 特效和

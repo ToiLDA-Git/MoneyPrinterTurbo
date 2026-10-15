@@ -46,6 +46,35 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
 }
                     
 class TestVoiceService(unittest.TestCase):
+    def test_edge_explicit_timeout_is_used_without_changing_default(self):
+        from unittest.mock import Mock
+        maker = Mock()
+        maker.get_srt.return_value = 'synchronized cues'
+        def stream(communicate, consume, timeout_seconds):
+            consume({'type': 'audio', 'data': b'audio'})
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(vs, 'create_edge_tts_communicate'), \
+             patch.object(vs.edge_tts, 'SubMaker', return_value=maker), \
+             patch.object(vs, 'get_edge_tts_timeout_seconds', return_value=30), \
+             patch.object(vs, 'stream_edge_tts_chunks', side_effect=stream) as consume:
+            target = str(Path(directory)/'narration.mp3')
+            self.assertIs(vs.azure_tts_v1('Xin chào', 'vi-VN-HoaiMyNeural', 1, target, timeout_seconds=90), maker)
+            self.assertEqual(consume.call_args.kwargs['timeout_seconds'], 90)
+            self.assertIs(vs.azure_tts_v1('Xin chào', 'vi-VN-HoaiMyNeural', 1, target), maker)
+            self.assertEqual(consume.call_args.kwargs['timeout_seconds'], 30)
+
+    def test_edge_strict_failure_preserves_dns_cause_and_legacy_return(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = str(Path(directory)/'narration.mp3')
+            cause = OSError('getaddrinfo failed')
+            with patch.object(vs, 'create_edge_tts_communicate', side_effect=cause) as create:
+                with self.assertRaisesRegex(RuntimeError, 'getaddrinfo failed.*speech.platform.bing.com') as error:
+                    vs.azure_tts_v1('Xin chào', 'vi-VN-HoaiMyNeural', 1, target, raise_on_error=True)
+                self.assertIs(error.exception.__cause__, cause)
+                self.assertEqual(create.call_count, 3)
+                self.assertIsNone(vs.azure_tts_v1('Xin chào', 'vi-VN-HoaiMyNeural', 1, target))
+                self.assertFalse(Path(target).exists())
+
     def setUp(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)

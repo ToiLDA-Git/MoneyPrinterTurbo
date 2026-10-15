@@ -14,6 +14,44 @@ from app.services import subtitle
 
 
 class TestSubtitleService(unittest.TestCase):
+    def test_model_transport_keeps_tls_verification(self):
+        import ssl
+        with patch('huggingface_hub.set_client_factory') as factory:
+            subtitle._configure_model_transport()
+        client = factory.call_args.args[0]()
+        try:
+            context = client._transport._pool._ssl_context
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(context.check_hostname)
+        finally:
+            client.close()
+
+    def test_completed_local_model_does_not_configure_download(self):
+        with tempfile.TemporaryDirectory() as root:
+            model_dir = Path(root) / 'models' / ('whisper-' + subtitle.model_size)
+            model_dir.mkdir(parents=True)
+            (model_dir / 'model.bin').write_bytes(b'model')
+            with (patch.object(subtitle, 'model', None),
+                  patch.object(subtitle.utils, 'root_dir', return_value=root),
+                  patch.object(subtitle, 'WhisperModel') as constructor,
+                  patch.object(subtitle, '_configure_model_transport') as transport):
+                self.assertTrue(subtitle._ensure_model_loaded())
+                transport.assert_not_called()
+                self.assertEqual(Path(constructor.call_args.kwargs['model_size_or_path']), model_dir)
+
+    def test_incomplete_local_model_uses_verified_download(self):
+        with tempfile.TemporaryDirectory() as root:
+            model_dir = Path(root) / 'models' / ('whisper-' + subtitle.model_size)
+            model_dir.mkdir(parents=True)
+            (model_dir / 'model.bin.part').write_bytes(b'partial')
+            with (patch.object(subtitle, 'model', None),
+                  patch.object(subtitle.utils, 'root_dir', return_value=root),
+                  patch.object(subtitle, 'WhisperModel') as constructor,
+                  patch.object(subtitle, '_configure_model_transport') as transport):
+                self.assertTrue(subtitle._ensure_model_loaded())
+                transport.assert_called_once()
+                self.assertEqual(constructor.call_args.kwargs['model_size_or_path'], subtitle.model_size)
+
     def test_concurrent_subtitles_initialize_whisper_once(self):
         """Concurrent jobs must not load the large Whisper model twice."""
         first_constructor_started = threading.Event()

@@ -195,7 +195,7 @@ def get_minimax_voices(voice_id: str | None = None) -> list[str]:
     return [f"minimax:{voice_id}"]
 
 
-def get_elevenlabs_voices(api_key: str) -> list[str]:
+def get_elevenlabs_voices(api_key: str, *, with_metadata: bool = False) -> list:
     if not api_key:
         return []
     try:
@@ -243,7 +243,13 @@ def get_elevenlabs_voices(api_key: str) -> list[str]:
                     and identity not in seen_voices
                 ):
                     seen_voices.add(identity)
-                    result.append(f"elevenlabs:{identity}:{name}")
+                    if with_metadata:
+                        labels = entry.get('labels') or {}
+                        gender = str(labels.get('gender', '')).title()
+                        result.append(dict(id=f"elevenlabs:{identity}:{name}", name=name,
+                                           gender=gender if gender in ('Male','Female') else None))
+                    else:
+                        result.append(f"elevenlabs:{identity}:{name}")
             token = data.get("next_page_token")
             if data.get("has_more") is not True or not isinstance(token, str) or not token:
                 break
@@ -451,7 +457,9 @@ def parse_gemini_voice_name(voice_name: str | None) -> str:
     """从新旧 Gemini 下拉框值中提取 Google API 使用的预置音色名称。"""
     if not is_gemini_voice(voice_name or ""):
         return ""
-    return (voice_name or "").split(":", 1)[1].split("-", 1)[0].strip()
+    identity=(voice_name or "").split(":",1)[1].strip()
+    head=identity.split('-',1)[0]
+    return head if head in {name for name,_ in GEMINI_TTS_VOICES} else identity
 
 
 def is_mimo_voice(voice_name: str):
@@ -1297,7 +1305,7 @@ def populate_legacy_submaker_with_full_text(
 
 
 def create_edge_tts_communicate(
-    text: str, voice_name: str, rate_str: str
+    text: str, voice_name: str, rate_str: str, *, pitch: str = "+0Hz"
 ) -> edge_tts.Communicate:
     """
     按当前已安装的 edge_tts 版本构造 Communicate 对象。
@@ -1316,6 +1324,10 @@ def create_edge_tts_communicate(
 
     if "boundary" in communicate_signature.parameters:
         communicate_kwargs["boundary"] = "WordBoundary"
+    if pitch != "+0Hz":
+        if "pitch" not in communicate_signature.parameters:
+            raise ValueError("Installed Edge TTS does not support pitch")
+        communicate_kwargs["pitch"] = pitch
 
     return edge_tts.Communicate(text, voice_name, **communicate_kwargs)
 
@@ -1523,11 +1535,14 @@ def stream_edge_tts_chunks(
 
 
 def azure_tts_v1(
-    text: str, voice_name: str, voice_rate: float, voice_file: str
+    text: str, voice_name: str, voice_rate: float, voice_file: str, *, raise_on_error: bool = False,
+    timeout_seconds: float | None = None,
+    pitch_hz: int = 0,
 ) -> Union[SubMaker, None]:
     voice_name = parse_voice_name(voice_name)
     text = text.strip()
     rate_str = convert_rate_to_percent(voice_rate)
+    last_error = None
     for i in range(3):
         temp_path = None
         try:
@@ -1537,9 +1552,10 @@ def azure_tts_v1(
             # 1. 新版支持 `boundary` + `stream_sync()`
             # 2. 旧版不支持 `boundary`，且通常只暴露异步 `stream()`
             ensure_file_path_exists(voice_file)
-            communicate = create_edge_tts_communicate(text, voice_name, rate_str)
+            communicate = (create_edge_tts_communicate(text, voice_name, rate_str, pitch=f"{pitch_hz:+d}Hz")
+                           if pitch_hz else create_edge_tts_communicate(text, voice_name, rate_str))
             sub_maker = edge_tts.SubMaker()
-            timeout_seconds = get_edge_tts_timeout_seconds()
+            stream_timeout = get_edge_tts_timeout_seconds() if timeout_seconds is None else timeout_seconds
 
             descriptor, temp_path = tempfile.mkstemp(
                 prefix=".edge-tts-",
@@ -1558,16 +1574,18 @@ def azure_tts_v1(
                         sub_maker.feed(chunk)
 
                 stream_edge_tts_chunks(
-                    communicate, _handle_chunk, timeout_seconds=timeout_seconds
+                    communicate, _handle_chunk, timeout_seconds=stream_timeout
                 )
 
             # Edge can finish a stream with timing events but no audio payload.
             # Those events produce a nonempty SRT, yet the MP3 is unplayable.
             if os.path.getsize(temp_path) == 0:
+                last_error = ValueError("Edge TTS returned no audio")
                 logger.warning("failed, edge tts stream contained no audio")
                 continue
 
             if not sub_maker.get_srt():
+                last_error = ValueError("Edge TTS returned no synchronized subtitle cues")
                 logger.warning("failed, sub_maker.get_srt() is empty")
                 continue
 
@@ -1578,6 +1596,7 @@ def azure_tts_v1(
             logger.info(f"completed, output file: {voice_file}")
             return sub_maker
         except Exception as e:
+            last_error = e
             logger.error(f"failed, error: {str(e)}")
         finally:
             if temp_path is not None:
@@ -1588,6 +1607,13 @@ def azure_tts_v1(
                         "failed to remove temporary Edge TTS audio: "
                         f"{temp_path}, error: {remove_error}"
                     )
+    if raise_on_error:
+        reason = f"{type(last_error).__name__}: {last_error}"
+        raise RuntimeError(
+            f"Edge TTS failed after 3 attempts for {voice_name}: {reason}. "
+            "Check Internet/DNS access to speech.platform.bing.com and retry this job. "
+            "Alternatively upload matching narration audio and SRT in the job's local audio panel."
+        ) from last_error
     return None
 
 
@@ -1740,7 +1766,7 @@ def siliconflow_tts(
     return None
 
 
-def _build_azure_v2_ssml(text: str, voice_name: str, voice_rate: float) -> str:
+def _build_azure_v2_ssml(text: str, voice_name: str, voice_rate: float, *, pitch_percent: int = 0) -> str:
     """构造 Azure Speech V2 使用的 SSML，并安全规范化语速参数。"""
     try:
         normalized_rate = float(voice_rate)
@@ -1757,11 +1783,12 @@ def _build_azure_v2_ssml(text: str, voice_name: str, voice_rate: float) -> str:
     escaped_text = escape(text)
     escaped_voice_locale = escape(voice_locale, {'"': "&quot;"})
     escaped_voice_name = escape(voice_name, {'"': "&quot;"})
+    pitch_attribute = f' pitch="{int(pitch_percent):+d}%"' if pitch_percent else ''
     return (
         '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
         f'xml:lang="{escaped_voice_locale}">'
         f'<voice name="{escaped_voice_name}">'
-        f'<prosody rate="{normalized_rate:g}">{escaped_text}</prosody>'
+        f'<prosody rate="{normalized_rate:g}"{pitch_attribute}>{escaped_text}</prosody>'
         "</voice></speak>"
     )
 
@@ -1771,13 +1798,15 @@ def azure_tts_v2(
     voice_name: str,
     voice_file: str,
     voice_rate: float = 1.0,
+    *, pitch_percent: int = 0,
 ) -> Union[SubMaker, None]:
     voice_name = is_azure_v2_voice(voice_name)
     if not voice_name:
         logger.error(f"invalid voice name: {voice_name}")
         raise ValueError(f"invalid voice name: {voice_name}")
     text = text.strip()
-    ssml = _build_azure_v2_ssml(text, voice_name, voice_rate)
+    ssml = (_build_azure_v2_ssml(text, voice_name, voice_rate, pitch_percent=pitch_percent)
+            if pitch_percent else _build_azure_v2_ssml(text, voice_name, voice_rate))
 
     def _format_duration_to_offset(duration) -> int:
         if isinstance(duration, timedelta):
@@ -1901,6 +1930,9 @@ def gemini_tts(
     voice_rate: float,
     voice_file: str,
     voice_volume: float = 1.0,
+    *, style_prompt: str = "",
+    model_id: str = "", directors_notes: str = "", edge_fallback: bool = False,
+    fallback_gender: str | None = None, return_result: bool = False,
 ) -> Union[SubMaker, None]:
     """
     使用Google Gemini TTS生成语音
@@ -1915,6 +1947,15 @@ def gemini_tts(
     Returns:
         SubMaker对象或None
     """
+    if model_id or directors_notes or return_result:
+        from app.services import gemini_speech
+        result=gemini_speech.generate(text,voice_name,voice_file,model=model_id or gemini_speech.DEFAULT_MODEL,
+            notes=' '.join(p for p in (style_prompt,directors_notes.strip()) if p),
+            fallback=edge_fallback,fallback_gender=fallback_gender)
+        if return_result:
+            return result
+        return result.maker or populate_legacy_submaker_with_full_text(
+            ensure_legacy_submaker_fields(SubMaker()),text,get_audio_duration(voice_file))
     import base64
     import io
     from pydub import AudioSegment
@@ -1947,7 +1988,9 @@ def gemini_tts(
         with genai.Client(api_key=api_key) as client:
             response = client.models.generate_content(
                 model="gemini-2.5-flash-preview-tts",
-                contents=text,
+                contents=(f"Read only the text below in natural Vietnamese, preserving its words and punctuation. "
+                          f"Delivery direction (do not read aloud): {style_prompt}\n\nText:\n{text}"
+                          if style_prompt else text),
                 config=generation_config,
             )
 
@@ -2026,7 +2069,7 @@ def gemini_tts(
         logger.error(f"Missing required package for Gemini TTS: {str(e)}. Please install: pip install pydub")
         return None
     except Exception as e:
-        logger.error(f"Gemini TTS failed, error: {str(e)}")
+        logger.error(f"Gemini TTS failed ({type(e).__name__}); check provider configuration")
         return None
 
     finally:
@@ -2361,7 +2404,7 @@ def _write_validated_minimax_audio(audio_bytes: bytes, voice_file: str) -> float
             os.remove(temp_path)
 
 
-def minimax_tts(text: str, voice_id: str, voice_rate: float, voice_file: str, voice_volume: float = 1.0) -> Union[SubMaker, None]:
+def minimax_tts(text: str, voice_id: str, voice_rate: float, voice_file: str, voice_volume: float = 1.0, *, pitch_override: int | None = None) -> Union[SubMaker, None]:
     """Generate speech with the synchronous MiniMax T2A HTTP API."""
     text, voice_id = (text or "").strip(), (voice_id or "").strip()
     if not text or not voice_id:
@@ -2380,7 +2423,7 @@ def minimax_tts(text: str, voice_id: str, voice_rate: float, voice_file: str, vo
     try:
         speed = max(0.5, min(2.0, float(voice_rate or 1.0)))
         volume = max(0.0, min(10.0, float(voice_volume or 1.0)))
-        pitch = max(-12, min(12, int(settings.get("pitch", 0) or 0)))
+        pitch = max(-12, min(12, int(settings.get("pitch", 0) or 0) if pitch_override is None else int(pitch_override)))
         sample_rate = int(settings.get("sample_rate", 32000) or 32000)
         bitrate = int(settings.get("bitrate", 128000) or 128000)
         channel = int(settings.get("channel", 1) or 1)

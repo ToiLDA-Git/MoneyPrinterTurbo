@@ -74,6 +74,10 @@ class _FakeMoviePyClip:
     def with_effects(self, _effects):
         return self
 
+    def with_duration(self, duration):
+        self.duration = duration
+        return self
+
     def with_audio(self, _audio):
         return self.with_audio_result
 
